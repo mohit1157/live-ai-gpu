@@ -96,10 +96,10 @@ async def lifespan(app: FastAPI):
     renderer = LivePortraitRenderer(model_path=model_path, device=device)
 
     # Initialize video encoder
-    encoder = NVENCEncoder(width=512, height=512, fps=30, codec="h264", preset="low_latency")
+    encoder = NVENCEncoder(width=512, height=512, fps=30, codec="h264", preset="low_latency") if NVENCEncoder else None
 
     # Initialize WebRTC handler
-    webrtc_handler = WebRTCHandler(renderer=renderer, encoder=encoder)
+    webrtc_handler = WebRTCHandler(renderer=renderer, encoder=encoder) if WebRTCHandler else None
 
     logger.info(
         "Avatar service ready. Model loaded: %s, Device: %s",

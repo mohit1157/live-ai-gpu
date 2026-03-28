@@ -1,8 +1,8 @@
 """
 Voice Service - GPU-accelerated voice cloning and TTS synthesis.
 
-Uses XTTS v2 for voice cloning and text-to-speech. Falls back to silent
-audio stubs when the GPU model is not available.
+Uses Fish Speech S2 for zero-shot voice cloning and text-to-speech.
+Falls back to silent audio stubs when the GPU model is not available.
 
 Endpoints:
   POST /clone           - Start a voice cloning job
@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from models.xtts_v2 import XTTSVoiceCloner
+from models.fish_speech import FishSpeechCloner
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
-voice_cloner: Optional[XTTSVoiceCloner] = None
+voice_cloner: Optional[FishSpeechCloner] = None
 clone_jobs: dict[str, dict] = {}  # job_id -> {status, progress, message, output_dir}
 
 
@@ -50,10 +50,10 @@ async def lifespan(app: FastAPI):
 
     logger.info("Voice service starting up...")
 
-    model_path = os.environ.get("XTTS_MODEL_PATH")
+    model_path = os.environ.get("FISH_SPEECH_MODEL_PATH")
     device = "cuda" if os.environ.get("NVIDIA_VISIBLE_DEVICES") else "cpu"
 
-    voice_cloner = XTTSVoiceCloner(model_path=model_path, device=device)
+    voice_cloner = FishSpeechCloner(model_path=model_path, device=device)
     logger.info("Voice service ready (device=%s, model_loaded=%s)", device, voice_cloner.is_loaded)
 
     yield
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Voice Service",
-    description="GPU-accelerated voice cloning and TTS service using XTTS v2",
+    description="GPU-accelerated voice cloning and TTS service using Fish Speech S2",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -219,7 +219,7 @@ async def synthesize(request: SynthesizeRequest) -> StreamingResponse:
         logger.error("Synthesis failed: %s", e, exc_info=True)
         # Fallback: generate silent audio with estimated duration
         duration = max(1.0, len(request.text.split()) / 150 * 60)
-        wav_bytes = XTTSVoiceCloner.generate_silent_wav_bytes(duration)
+        wav_bytes = FishSpeechCloner.generate_silent_wav_bytes(duration)
         return StreamingResponse(
             io.BytesIO(wav_bytes),
             media_type="audio/wav",

@@ -6,12 +6,12 @@ This FastAPI application provides:
 2. Batch rendering for video generation
 3. Real-time WebRTC-based streaming with <30ms latency
 4. Avatar model management (load, cache, unload)
-5. Training job orchestration (delegates to GPU workers)
+5. Training job orchestration (source feature extraction)
 
-The rendering pipeline uses 3D Gaussian Splatting with TensorRT acceleration
-on NVIDIA A10G/A100 GPUs. See renderer/ and realtime/ modules for details.
+Uses LivePortrait for high-quality talking head animation.
+Falls back to placeholder rendering when GPU models are not available.
 
-Deployment: AWS g5.xlarge (A10G GPU, 24GB VRAM)
+Deployment: RunPod A100 80GB or AWS g5.xlarge (A10G GPU, 24GB VRAM)
 Target: 30fps real-time rendering at 512x512 resolution
 """
 
@@ -30,7 +30,7 @@ from fastapi.responses import StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from renderer.gaussian_renderer import GaussianAvatarRenderer
+from models.live_portrait import LivePortraitRenderer, LivePortraitTrainer
 from renderer.nvenc_encoder import NVENCEncoder
 from realtime.webrtc_handler import WebRTCHandler
 from realtime.frame_pipeline import FramePipeline
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Global instances (initialized in lifespan)
 # ---------------------------------------------------------------------------
 
-renderer: Optional[GaussianAvatarRenderer] = None
+renderer: Optional[LivePortraitRenderer] = None
 encoder: Optional[NVENCEncoder] = None
 webrtc_handler: Optional[WebRTCHandler] = None
 # Active frame pipelines keyed by session_id
@@ -77,8 +77,11 @@ async def lifespan(app: FastAPI):
 
     logger.info("Avatar service starting up...")
 
-    # Initialize renderer with LRU cache for 5 models
-    renderer = GaussianAvatarRenderer(cache_size=5, default_resolution=(512, 512))
+    # Initialize LivePortrait renderer
+    import os
+    model_path = os.environ.get("LIVEPORTRAIT_MODEL_PATH")
+    device = "cuda" if os.environ.get("NVIDIA_VISIBLE_DEVICES") else "cpu"
+    renderer = LivePortraitRenderer(model_path=model_path, device=device)
 
     # Initialize video encoder
     encoder = NVENCEncoder(width=512, height=512, fps=30, codec="h264", preset="low_latency")
@@ -87,9 +90,9 @@ async def lifespan(app: FastAPI):
     webrtc_handler = WebRTCHandler(renderer=renderer, encoder=encoder)
 
     logger.info(
-        "Avatar service ready. GPU: %s, TensorRT: %s",
-        renderer.gpu_available,
-        renderer._trt_available,
+        "Avatar service ready. Model loaded: %s, Device: %s",
+        renderer.is_loaded,
+        renderer.device,
     )
 
     yield
@@ -283,8 +286,8 @@ async def render_avatar(request: RenderRequest) -> StreamingResponse:
 
     frame = renderer.render_frame(
         model_id,
-        flame_dict,
-        camera={"resolution": (request.resolution, request.resolution)},
+        flame_params=flame_dict,
+        resolution=request.resolution,
     )
 
     # Convert numpy RGBA to PNG
@@ -316,7 +319,7 @@ async def render_batch(request: BatchRenderRequest) -> BatchRenderResponse:
         for p in request.flame_params_sequence
     ]
 
-    frames = renderer.render_batch(model_id, flame_dicts)
+    frames = renderer.render_batch(model_id, flame_params_sequence=flame_dicts)
 
     # TODO: Encode frames to video and upload to S3
     output_url = f"s3://liveai-assets/renders/{uuid.uuid4()}/frames.tar.gz"
@@ -418,7 +421,7 @@ async def render_stats() -> dict:
     }
 
     return {
-        "renderer": renderer.get_stats(),
+        "renderer": {"is_loaded": renderer.is_loaded, "device": renderer.device, "loaded_models": len(renderer._loaded_sources)},
         "encoder": encoder.get_stats(),
         "active_sessions": webrtc_handler.get_active_sessions(),
         "pipelines": pipeline_stats,
@@ -496,7 +499,7 @@ async def render_stream(websocket: WebSocket) -> None:
                 }
 
                 # Render frame directly (pipeline is for advanced WebRTC use)
-                frame = renderer.render_frame(session_model_id, flame_dict)
+                frame = renderer.render_frame(session_model_id, flame_params=flame_dict)
 
                 # Send frame as PNG binary
                 img = Image.fromarray(frame, mode="RGBA")
@@ -533,13 +536,18 @@ async def health() -> HealthResponse:
     Reports GPU availability, TensorRT status, model cache stats,
     and number of active rendering sessions.
     """
-    stats = renderer.get_stats() if renderer else {}
-    cache_stats = stats.get("cache_stats", {})
+    gpu_available = False
+    try:
+        import subprocess
+        result = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
+        gpu_available = result.returncode == 0
+    except Exception:
+        pass
 
     return HealthResponse(
         status="ok",
-        gpu_available=stats.get("gpu_available", False),
-        tensorrt_available=stats.get("tensorrt_available", False),
+        gpu_available=gpu_available,
+        tensorrt_available=False,
         active_sessions=len(frame_pipelines),
-        cache_stats=cache_stats,
+        cache_stats={"loaded_models": len(renderer._loaded_sources) if renderer else 0},
     )

@@ -1,0 +1,92 @@
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+
+# Prevent interactive prompts during install
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    supervisor \
+    curl \
+    wget \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set python3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# Create workspace
+WORKDIR /workspace/live-ai
+
+# Install PyTorch with CUDA support
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Copy requirements and install Python dependencies
+COPY deploy/runpod/requirements-gpu.txt /tmp/requirements-gpu.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-gpu.txt
+
+# Install AI model packages
+RUN pip install --no-cache-dir \
+    fish-speech>=2.0.0 \
+    transformers>=4.40.0 \
+    diffusers>=0.28.0 \
+    accelerate>=0.30.0 \
+    safetensors>=0.4.0 \
+    opencv-python-headless>=4.9.0
+
+# Clone LivePortrait
+RUN git clone https://github.com/KwaiVGI/LivePortrait.git /workspace/LivePortrait && \
+    cd /workspace/LivePortrait && \
+    pip install --no-cache-dir -r requirements.txt || true
+
+# Clone MuseTalk for real-time streaming
+RUN git clone https://github.com/TMElyralab/MuseTalk.git /workspace/MuseTalk && \
+    cd /workspace/MuseTalk && \
+    pip install --no-cache-dir -r requirements.txt || true
+
+# Copy all service code
+COPY services/avatar /workspace/live-ai/services/avatar
+COPY services/voice /workspace/live-ai/services/voice
+COPY services/expression /workspace/live-ai/services/expression
+COPY services/streaming /workspace/live-ai/services/streaming
+
+# Copy supervisord config
+COPY deploy/runpod/supervisord.conf /etc/supervisor/conf.d/liveai.conf
+
+# Create log directories
+RUN mkdir -p /var/log/supervisor /var/log/liveai
+
+# Create model cache directories
+RUN mkdir -p /workspace/models/liveportrait \
+    /workspace/models/musetalk \
+    /workspace/models/fish-speech \
+    /workspace/models/rmbg \
+    /workspace/models/sdxl
+
+# Model download script
+COPY deploy/runpod/download_models.sh /workspace/download_models.sh
+RUN chmod +x /workspace/download_models.sh || true
+
+# Health check script
+COPY deploy/runpod/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/healthcheck.sh || true
+
+# Expose all service ports
+EXPOSE 8001 8002 8003 8004 8005
+
+# Use supervisord to manage all services
+CMD ["supervisord", "-n", "-c", "/etc/supervisor/conf.d/liveai.conf"]

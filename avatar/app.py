@@ -31,9 +31,21 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from models.live_portrait import LivePortraitRenderer, LivePortraitTrainer
-from renderer.nvenc_encoder import NVENCEncoder
-from realtime.webrtc_handler import WebRTCHandler
-from realtime.frame_pipeline import FramePipeline
+
+try:
+    from renderer.nvenc_encoder import NVENCEncoder
+except ImportError:
+    NVENCEncoder = None
+
+try:
+    from realtime.webrtc_handler import WebRTCHandler
+except ImportError:
+    WebRTCHandler = None
+
+try:
+    from realtime.frame_pipeline import FramePipeline
+except ImportError:
+    FramePipeline = None
 
 # ---------------------------------------------------------------------------
 # Logging

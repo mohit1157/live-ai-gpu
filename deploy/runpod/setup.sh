@@ -15,10 +15,10 @@ set -e
 #
 # Usage:
 #   1. Create a RunPod pod with the config above
-#   2. Open terminal in the pod
-#   3. git clone <your-repo> /workspace/live-ai && cd /workspace/live-ai
-#   4. chmod +x deploy/runpod/setup.sh
-#   5. ./deploy/runpod/setup.sh
+#   2. Set start command: bash -c 'cd /workspace && git clone https://github.com/mohit1157/live-ai-gpu.git live-ai 2>/dev/null; cd live-ai && bash deploy/runpod/setup.sh'
+#   Or manually:
+#   1. git clone https://github.com/mohit1157/live-ai-gpu.git /workspace/live-ai
+#   2. cd /workspace/live-ai && bash deploy/runpod/setup.sh
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

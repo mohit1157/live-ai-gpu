@@ -1,0 +1,157 @@
+version: "3.8"
+
+# Optimized for Raspberry Pi 4 (8GB) - ARM64
+# Runs: Postgres, Redis, MinIO, API, Web, Celery Worker
+# GPU AI services run on RunPod (configured via .env)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: liveai
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Limit memory on Pi
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/liveai-assets;
+      mc anonymous set download local/liveai-assets/public;
+      exit 0;
+      "
+
+  api:
+    build:
+      context: ../../apps/api
+      dockerfile: ../../docker/api.Dockerfile
+      platforms:
+        - linux/arm64
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${DB_PASSWORD:-postgres}@postgres:5432/liveai
+      DATABASE_URL_SYNC: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/liveai
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: liveai-assets
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY}
+      # RunPod GPU service URLs (set after deploying to RunPod)
+      AVATAR_SERVICE_URL: ${AVATAR_SERVICE_URL:-http://localhost:8001}
+      VOICE_SERVICE_URL: ${VOICE_SERVICE_URL:-http://localhost:8002}
+      EXPRESSION_SERVICE_URL: ${EXPRESSION_SERVICE_URL:-http://localhost:8003}
+      STREAMING_SERVICE_URL: ${STREAMING_SERVICE_URL:-http://localhost:8004}
+      ALLOWED_ORIGINS: '["http://localhost:3000","http://${PI_IP:-192.168.1.100}:3000"]'
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  celery-worker:
+    build:
+      context: ../../apps/api
+      dockerfile: ../../docker/worker.Dockerfile
+      platforms:
+        - linux/arm64
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      DATABASE_URL_SYNC: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/liveai
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: liveai-assets
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AVATAR_SERVICE_URL: ${AVATAR_SERVICE_URL:-http://localhost:8001}
+      VOICE_SERVICE_URL: ${VOICE_SERVICE_URL:-http://localhost:8002}
+      EXPRESSION_SERVICE_URL: ${EXPRESSION_SERVICE_URL:-http://localhost:8003}
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  web:
+    build:
+      context: ../../
+      dockerfile: docker/web.Dockerfile
+      platforms:
+        - linux/arm64
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    environment:
+      API_URL: http://api:8000
+      NEXT_PUBLIC_API_URL: http://${PI_IP:-192.168.1.100}:8000
+      NEXT_PUBLIC_WS_URL: ws://${PI_IP:-192.168.1.100}:8000
+      NEXTAUTH_URL: http://${PI_IP:-192.168.1.100}:3000
+      NEXTAUTH_SECRET: ${JWT_SECRET:-change-me-in-production}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+
+networks:
+  default:
+    name: liveai-network
